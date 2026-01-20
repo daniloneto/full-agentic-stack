@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { Pool } from 'pg';
 import { Logger, criarClienteCriadoEvent, criarProdutoCriadoEvent, criarPedidoCriadoEvent } from '@agentic/shared';
 import { RabbitMQEventBus } from '@agentic/event-bus';
+import { Client } from '@opensearch-project/opensearch';
 
 interface AppConfig {
   port: number;
@@ -33,6 +34,7 @@ export class ApiGateway {
   private readonly eventBus: RabbitMQEventBus;
   private readonly dbPool: Pool;
   private readonly config: AppConfig;
+  private readonly opensearchClient: Client;
 
   constructor(config: AppConfig) {
     this.config = config;
@@ -46,6 +48,17 @@ export class ApiGateway {
       max: 20,
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 10000,
+    });    // Initialize OpenSearch client
+    this.opensearchClient = new Client({
+      node: process.env.OPENSEARCH_URL || 'https://agentic-opensearch:9200',
+      auth: {
+        username: process.env.OPENSEARCH_USERNAME || 'admin',
+        password: process.env.OPENSEARCH_PASSWORD || 'admin',
+      },
+      ssl: {
+        rejectUnauthorized: false,
+        secureProtocol: 'TLSv1_2_method',
+      },
     });
 
     this.setupMiddleware();
@@ -104,6 +117,11 @@ export class ApiGateway {
     this.app.get('/api/pedidos/:id', this.handleGetPedido.bind(this));
     this.app.put('/api/pedidos/:id', this.handleUpdatePedido.bind(this));
     this.app.delete('/api/pedidos/:id', this.handleDeletePedido.bind(this));
+
+    // Search routes (OpenSearch)
+    this.app.post('/api/search/produtos', this.handleSearchProdutos.bind(this));
+    this.app.post('/api/search/clientes', this.handleSearchClientes.bind(this));
+    this.app.post('/api/search/pedidos', this.handleSearchPedidos.bind(this));
 
     // 404
     this.app.use((_req: Request, res: Response) => {
@@ -920,6 +938,128 @@ export class ApiGateway {
       });
     } catch (error) {
       next(error);
+    }
+  }
+  /**
+   * Handle search produtos in OpenSearch
+   */
+  private async handleSearchProdutos(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { query } = req.body;
+      const searchTerm = query || '*';
+
+      const result = await this.opensearchClient.search({
+        index: 'produtos',
+        body: {
+          query: searchTerm === '*' ? { match_all: {} } : {
+            multi_match: {
+              query: searchTerm,
+              fields: ['nome^2', 'descricao', 'sku'],
+            },
+          },
+          size: 100,
+        },
+      });
+
+      const hits = (result as any).body.hits.hits;
+      const data = hits.map((hit: any) => hit._source);      res.json({
+        data,
+        total: (result as any).body.hits.total.value,
+      });
+    } catch (error) {
+      this.logger.error('Search produtos error', { 
+        message: (error as any).message,
+        meta: (error as any).meta,
+        body: (error as any).body,
+        statusCode: (error as any).statusCode,
+      });
+      res.status(500).json({ 
+        error: 'Search failed', 
+        detail: (error as any).message,
+        statusCode: (error as any).statusCode,
+      });
+    }
+  }
+
+  /**
+   * Handle search clientes in OpenSearch
+   */
+  private async handleSearchClientes(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { query } = req.body;
+      const searchTerm = query || '*';
+
+      const result = await this.opensearchClient.search({
+        index: 'clientes',
+        body: {
+          query: searchTerm === '*' ? { match_all: {} } : {
+            multi_match: {
+              query: searchTerm,
+              fields: ['nome^2', 'email', 'telefone'],
+            },
+          },
+          size: 100,
+        },
+      });
+
+      const hits = (result as any).body.hits.hits;
+      const data = hits.map((hit: any) => hit._source);      res.json({
+        data,
+        total: (result as any).body.hits.total.value,
+      });
+    } catch (error) {
+      this.logger.error('Search clientes error', { 
+        message: (error as any).message,
+        meta: (error as any).meta,
+        body: (error as any).body,
+        statusCode: (error as any).statusCode,
+      });
+      res.status(500).json({ 
+        error: 'Search failed', 
+        detail: (error as any).message,
+        statusCode: (error as any).statusCode,
+      });
+    }
+  }
+
+  /**
+   * Handle search pedidos in OpenSearch
+   */
+  private async handleSearchPedidos(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { query } = req.body;
+      const searchTerm = query || '*';
+
+      const result = await this.opensearchClient.search({
+        index: 'pedidos',
+        body: {
+          query: searchTerm === '*' ? { match_all: {} } : {
+            multi_match: {
+              query: searchTerm,
+              fields: ['id', 'cliente_id', 'status'],
+            },
+          },
+          size: 100,
+        },
+      });
+
+      const hits = (result as any).body.hits.hits;
+      const data = hits.map((hit: any) => hit._source);      res.json({
+        data,
+        total: (result as any).body.hits.total.value,
+      });
+    } catch (error) {
+      this.logger.error('Search pedidos error', { 
+        message: (error as any).message,
+        meta: (error as any).meta,
+        body: (error as any).body,
+        statusCode: (error as any).statusCode,
+      });
+      res.status(500).json({ 
+        error: 'Search failed', 
+        detail: (error as any).message,
+        statusCode: (error as any).statusCode,
+      });
     }
   }
 

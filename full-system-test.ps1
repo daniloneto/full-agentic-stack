@@ -159,7 +159,15 @@ if ($pr.success) {
       } else {
         LogWarn "Erro listar produtos (fallback): $($pl.error)"; $results += @{ test='list_produtos'; ok=$false; error=$pl.error }
       }
-    }
+    }    # Wait for SearchAgent to index produto (CDC from SearchAgent)
+    LogInfo "Aguardando indexacao do produto no OpenSearch..."
+    $searchProd = WaitForApi 'POST' "$ApiBaseUrl/search/produtos" { param($r)
+      $items = Get-ListItems $r
+      return ($items | Where-Object { $_.sku -eq $sku }) -ne $null
+    } ([int]($WaitForProcessingSeconds * 3)) 1 (@{ query=$sku } | ConvertTo-Json)
+    if ($searchProd.success) { LogOk "Produto indexado no SearchAgent (OpenSearch)"; $results += @{ test='search_produto_index'; ok=$true } }
+    else { LogWarn "Produto nao indexado no OpenSearch em tempo (pode estar ainda processando)"; $results += @{ test='search_produto_index'; ok=$false; note='timeout' } }
+
   } else { LogWarn "Produto criado mas id nao encontrado: $($pr.result | ConvertTo-Json -Depth 4)"; $results += @{ test='create_produto'; ok=$true; id=$null; resp=$pr.result } }
 } else { LogErr "Falha criar produto: $($pr.error)"; $results += @{ test='create_produto'; ok=$false; error=$pr.error } }
 
@@ -187,7 +195,15 @@ if ($cr.success) {
       } else {
         LogWarn "Erro listar clientes (fallback): $($cl.error)"; $results += @{ test='list_clientes'; ok=$false; error=$cl.error }
       }
-    }
+    }    # Wait for SearchAgent to index cliente
+    LogInfo "Aguardando indexacao do cliente no OpenSearch..."
+    $searchCli = WaitForApi 'POST' "$ApiBaseUrl/search/clientes" { param($r)
+      $items = Get-ListItems $r
+      return ($items | Where-Object { $_.email -eq $clienteEmail }) -ne $null
+    } ([int]($WaitForProcessingSeconds * 3)) 1 (@{ query=$clienteEmail } | ConvertTo-Json)
+    if ($searchCli.success) { LogOk "Cliente indexado no SearchAgent (OpenSearch)"; $results += @{ test='search_cliente_index'; ok=$true } }
+    else { LogWarn "Cliente nao indexado no OpenSearch em tempo (pode estar ainda processando)"; $results += @{ test='search_cliente_index'; ok=$false; note='timeout' } }
+
   } else { LogWarn "Cliente criado mas id nao encontrado: $($cr.result | ConvertTo-Json -Depth 4)"; $results += @{ test='create_cliente'; ok=$true; id=$null } }
 } else { LogErr "Falha criar cliente: $($cr.error)"; $results += @{ test='create_cliente'; ok=$false; error=$cr.error } }
 
@@ -213,11 +229,19 @@ if ($created.pedidoId) {
 
   # Update pedido status (only if we could fetch it)
   if ($gpwait.success) {
-    $upd = @{ status='APROVADO' } | ConvertTo-Json
+    $upd = @{ status='CONFIRMADO' } | ConvertTo-Json
     $ur = DoRequest 'PUT' "$ApiBaseUrl/pedidos/$($created.pedidoId)" $upd
     if ($ur.success) { LogOk "Pedido atualizado"; $results += @{ test='update_pedido'; ok=$true; resp=$ur.result } }
     else { LogErr "Falha atualizar pedido: $($ur.error)"; $results += @{ test='update_pedido'; ok=$false; error=$ur.error } }
   }
+  # Wait for SearchAgent to index pedido
+  LogInfo "Aguardando indexacao do pedido no OpenSearch..."
+  $searchPedido = WaitForApi 'POST' "$ApiBaseUrl/search/pedidos" { param($r)
+    $items = Get-ListItems $r
+    return ($items | Where-Object { $_.id -eq $pedidoId }) -ne $null
+  } ([int]($WaitForProcessingSeconds * 3)) 1 (@{ query=$pedidoId } | ConvertTo-Json)
+  if ($searchPedido.success) { LogOk "Pedido indexado no SearchAgent (OpenSearch)"; $results += @{ test='search_pedido_index'; ok=$true } }
+  else { LogWarn "Pedido nao indexado no OpenSearch em tempo (pode estar ainda processando)"; $results += @{ test='search_pedido_index'; ok=$false; note='timeout' } }
 }
 
 # Cleanup
