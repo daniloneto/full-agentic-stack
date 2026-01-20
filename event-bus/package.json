@@ -1,0 +1,24 @@
+{
+  "name": "@agentic/event-bus",
+  "version": "1.0.0",
+  "description": "Event Bus implementation using RabbitMQ",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "type-check": "tsc --noEmit"
+  },  "dependencies": {
+    "@agentic/shared": "file:../shared",
+    "amqplib": "^0.10.4",
+    "winston": "^3.11.0",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/amqplib": "^0.10.5",
+    "@types/node": "^20.10.0",
+    "@types/uuid": "^9.0.7",
+    "typescript": "^5.3.3"
+  }
+}

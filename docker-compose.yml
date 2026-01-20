@@ -1,0 +1,338 @@
+version: '3.9'
+
+services:
+  # Message Broker
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: agentic-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: admin123
+      RABBITMQ_DEFAULT_VHOST: /
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://admin:admin123@localhost:15672/api/aliveness-test/%2F"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - agentic-network
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+
+  # Relational Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: agentic-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: agentic
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres123
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=en_US.UTF-8"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - agentic-network
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./cdc/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  # Cache Layer
+  redis:
+    image: redis:7-alpine
+    container_name: agentic-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - agentic-network
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+
+  # Document Database
+  mongo:
+    image: mongo:7
+    container_name: agentic-mongo
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: admin123
+      MONGO_INITDB_DATABASE: agentic
+    healthcheck:
+      test: ["CMD", "mongosh", "mongodb://admin:admin123@localhost:27017/admin", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - agentic-network
+    volumes:
+      - mongo-data:/data/db
+      - ./cdc/mongo-init.js:/docker-entrypoint-initdb.d/init-mongo.js
+
+  # Search Engine
+  opensearch:
+    image: opensearchproject/opensearch:2.11.0
+    container_name: agentic-opensearch
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    environment:
+      - discovery.type=single-node
+      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=admin
+      - DISABLE_SECURITY_PLUGIN=false
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -k -u admin:admin https://localhost:9200 >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - agentic-network
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+
+  # Object Storage
+  minio:
+    image: minio/minio:latest
+    container_name: agentic-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - agentic-network
+    volumes:
+      - minio-data:/data
+    command: server /data --console-address ":9001"
+
+  # API Gateway
+  api-gateway:
+    build:
+      context: .
+      dockerfile: ./api-gateway/Dockerfile
+    container_name: agentic-api-gateway
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: development
+      RABBITMQ_URL: amqp://admin:admin123@rabbitmq:5672
+      POSTGRES_URL: postgresql://postgres:postgres123@postgres:5432/agentic
+      REDIS_URL: redis://redis:6379
+      MONGO_URL: mongodb://admin:admin123@mongo:27017/agentic?authSource=admin
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin123
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - agentic-network
+    volumes:
+      - ./api-gateway/src:/app/src
+
+  # CDC Service
+  cdc:
+    build:
+      context: .
+      dockerfile: ./cdc/Dockerfile
+    container_name: agentic-cdc
+    environment:
+      NODE_ENV: development
+      RABBITMQ_URL: amqp://admin:admin123@rabbitmq:5672
+      POSTGRES_URL: postgresql://postgres:postgres123@postgres:5432/agentic
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - agentic-network
+    volumes:
+      - ./cdc/src:/app/src
+
+  # Pedido Agent
+  pedido-agent:
+    build:
+      context: .
+      dockerfile: ./agents/pedido-agent/Dockerfile
+    container_name: agentic-pedido-agent
+    restart: on-failure
+    environment:
+      NODE_ENV: development
+      RABBITMQ_URL: amqp://admin:admin123@rabbitmq:5672
+      POSTGRES_URL: postgresql://postgres:postgres123@postgres:5432/agentic
+      REDIS_URL: redis://redis:6379
+      MONGO_URL: mongodb://admin:admin123@mongo:27017/agentic?authSource=admin
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+    networks:
+      - agentic-network
+    volumes:
+      - ./agents/pedido-agent/src:/app/src
+
+  # Cliente Agent
+  cliente-agent:
+    build:
+      context: .
+      dockerfile: ./agents/cliente-agent/Dockerfile
+    container_name: agentic-cliente-agent
+    restart: on-failure
+    environment:
+      NODE_ENV: development
+      RABBITMQ_URL: amqp://admin:admin123@rabbitmq:5672
+      POSTGRES_URL: postgresql://postgres:postgres123@postgres:5432/agentic
+      REDIS_URL: redis://redis:6379
+      MONGO_URL: mongodb://admin:admin123@mongo:27017/agentic?authSource=admin
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+    networks:
+      - agentic-network
+    volumes:
+      - ./agents/cliente-agent/src:/app/src
+
+  # Produto Agent
+  produto-agent:
+    build:
+      context: .
+      dockerfile: ./agents/produto-agent/Dockerfile
+    container_name: agentic-produto-agent
+    restart: on-failure
+    environment:
+      NODE_ENV: development
+      RABBITMQ_URL: amqp://admin:admin123@rabbitmq:5672
+      POSTGRES_URL: postgresql://postgres:postgres123@postgres:5432/agentic
+      REDIS_URL: redis://redis:6379
+      MONGO_URL: mongodb://admin:admin123@mongo:27017/agentic?authSource=admin
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+    networks:
+      - agentic-network
+    volumes:
+      - ./agents/produto-agent/src:/app/src
+
+  # Search Agent
+  search-agent:
+    build:
+      context: .
+      dockerfile: ./agents/search-agent/Dockerfile
+    container_name: agentic-search-agent
+    environment:
+      NODE_ENV: development
+      RABBITMQ_URL: amqp://admin:admin123@rabbitmq:5672
+      OPENSEARCH_URL: https://opensearch:9200
+      OPENSEARCH_USERNAME: admin
+      OPENSEARCH_PASSWORD: admin
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+    networks:
+      - agentic-network
+    volumes:
+      - ./agents/search-agent/src:/app/src
+
+  # Cache Agent
+  cache-agent:
+    build:
+      context: .
+      dockerfile: ./agents/cache-agent/Dockerfile
+    container_name: agentic-cache-agent
+    restart: on-failure
+    environment:
+      NODE_ENV: development
+      RABBITMQ_URL: amqp://admin:admin123@rabbitmq:5672
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - agentic-network
+    volumes:
+      - ./agents/cache-agent/src:/app/src
+
+  # Audit Agent
+  audit-agent:
+    build:
+      context: .
+      dockerfile: ./agents/audit-agent/Dockerfile
+    container_name: agentic-audit-agent
+    restart: on-failure
+    environment:
+      NODE_ENV: development
+      RABBITMQ_URL: amqp://admin:admin123@rabbitmq:5672
+      MONGO_URL: mongodb://admin:admin123@mongo:27017/agentic?authSource=admin
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+    networks:
+      - agentic-network
+    volumes:
+      - ./agents/audit-agent/src:/app/src
+
+networks:
+  agentic-network:
+    driver: bridge
+
+volumes:
+  rabbitmq-data:
+  postgres-data:
+  redis-data:
+  mongo-data:
+  opensearch-data:
+  minio-data:

@@ -1,0 +1,49 @@
+{
+  "name": "full-agentic-stack",
+  "version": "1.0.0",
+  "description": "Event-driven multi-agent architecture system with polyglot persistence",
+  "main": "index.js",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "install:all": "npm install && npm install --workspace=event-bus && npm install --workspace=api-gateway && npm install --workspace=cdc && npm install --workspace=agents/pedido-agent && npm install --workspace=agents/cliente-agent && npm install --workspace=agents/produto-agent && npm install --workspace=agents/search-agent && npm install --workspace=agents/cache-agent && npm install --workspace=agents/audit-agent",
+    "build": "npm run build --workspaces",
+    "dev": "npm run dev --workspaces",
+    "start": "npm start --workspaces",
+    "docker:up": "docker-compose up -d",
+    "docker:down": "docker-compose down -v",
+    "docker:logs": "docker-compose logs -f",
+    "lint": "eslint . --ext .ts --fix",
+    "type-check": "tsc --noEmit"
+  },
+  "workspaces": [
+    "shared",
+    "event-bus",
+    "api-gateway",
+    "cdc",
+    "agents/pedido-agent",
+    "agents/cliente-agent",
+    "agents/produto-agent",
+    "agents/search-agent",
+    "agents/cache-agent",
+    "agents/audit-agent"
+  ],
+  "keywords": [
+    "event-driven",
+    "microservices",
+    "domain-driven-design",
+    "message-broker",
+    "polyglot-persistence"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "eslint": "^8.54.0",
+    "typescript": "^5.3.3"
+  }
+}
