@@ -554,12 +554,8 @@ curl http://localhost:3000/health
 
 | Documento | Descrição |
 |-----------|-----------|
-| [ETAPA1.md](./ETAPA1.md) | Estrutura base do projeto |
-| [ETAPA2.md](./ETAPA2.md) | Event Bus, API Gateway e CDC |
-| [ETAPA3.md](./ETAPA3.md) | CRUD completo e paginação |
-| [ETAPA4.md](./ETAPA4.md) | Agentes de domínio |
-| [ARQUITETURA_VISUAL.md](./ARQUITETURA_VISUAL.md) | Diagramas da arquitetura |
-| [CHEAT_SHEET.md](./CHEAT_SHEET.md) | Referência rápida |
+| [ARQUITETURA_VISUAL.md](./docs/ARQUITETURA_VISUAL.md) | Diagramas da arquitetura |
+| [CHEAT_SHEET.md](./docs/CHEAT_SHEET.md) | Referência rápida |
 
 ---
 
