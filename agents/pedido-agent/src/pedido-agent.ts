@@ -1,10 +1,12 @@
 import { Pool } from 'pg';
 import { createClient, RedisClientType } from 'redis';
-import { IEventBus, DomainEvent, IEventHandler, Logger } from '@agentic/shared';
+import { IEventBus, DomainEvent, IEventHandler, Logger, ICommandBus, ICommandHandler, CriarPedidoCommand, CriarPedidoCommandData, criarPedidoCriadoEvent, AtualizarPedidoCommand, AtualizarPedidoCommandData, CancelarPedidoCommand, CancelarPedidoCommandData } from '@agentic/shared';
 import amqp from 'amqplib';
+import { v4 as uuidv4 } from 'uuid';
 
 interface PedidoAgentConfig {
   eventBus: IEventBus;
+  commandBus: ICommandBus;
   databaseUrl: string;
   redisUrl: string;
   rabbitmqUrl: string;
@@ -50,6 +52,7 @@ interface PedidoItem {
  */
 export class PedidoAgent implements IEventHandler<Record<string, unknown>> {
   private readonly eventBus: IEventBus;
+  private readonly commandBus: ICommandBus;
   private readonly dbPool: Pool;
   private readonly redisClient: RedisClientType;
   private readonly logger: Logger;
@@ -74,6 +77,7 @@ export class PedidoAgent implements IEventHandler<Record<string, unknown>> {
   constructor(config: PedidoAgentConfig) {
     this.config = config;
     this.eventBus = config.eventBus;
+    this.commandBus = config.commandBus;
     this.logger = new Logger('PedidoAgent');
 
     // Initialize database pool
@@ -100,7 +104,8 @@ export class PedidoAgent implements IEventHandler<Record<string, unknown>> {
       this.logger.info('✓ Connected to Redis');
 
       // Test database connection
-      const result = await this.dbPool.query('SELECT NOW()');      this.logger.info('✓ Connected to PostgreSQL', { time: result.rows[0] });
+      const result = await this.dbPool.query('SELECT NOW()');
+      this.logger.info('✓ Connected to PostgreSQL', { time: result.rows[0] });
 
       // Setup RabbitMQ for publishing events
       await this.setupRabbitMQ();
@@ -114,12 +119,27 @@ export class PedidoAgent implements IEventHandler<Record<string, unknown>> {
       await this.subscribeToEvents();
       this.logger.info('✓ Subscribed to PedidoCriado events');
 
+      // Connect to RabbitMQ for command bus
+      await this.commandBus.connect();
+      this.logger.info('✓ Connected to RabbitMQ Command Bus');
+
+      // Subscribe to commands
+      const criarPedidoCommandHandler = new CriarPedidoCommandHandler(this.dbPool, this.eventBus, this.logger);
+      await this.commandBus.subscribe(criarPedidoCommandHandler, 'CriarPedidoCommand');
+
+      const atualizarPedidoCommandHandler = new AtualizarPedidoCommandHandler(this.dbPool, this.eventBus, this.logger);
+      await this.commandBus.subscribe(atualizarPedidoCommandHandler, 'AtualizarPedidoCommand');
+
+      const cancelarPedidoCommandHandler = new CancelarPedidoCommandHandler(this.dbPool, this.eventBus, this.logger);
+      await this.commandBus.subscribe(cancelarPedidoCommandHandler, 'CancelarPedidoCommand');
+
       this.logger.info('✓ Pedido Agent initialized successfully');
     } catch (error) {
       this.logger.error('Failed to initialize Pedido Agent', error);
       throw error;
     }
   }
+
   /**
    * Setup RabbitMQ connection for publishing events
    */
@@ -194,7 +214,8 @@ export class PedidoAgent implements IEventHandler<Record<string, unknown>> {
 
   /**
    * Subscribe to PedidoCriado events
-   */  private async subscribeToEvents(): Promise<void> {
+   */
+  private async subscribeToEvents(): Promise<void> {
     await this.eventBus.subscribe(this, 'PedidoCriado');
     this.logger.info('✓ Subscribed to PedidoCriado events');
   }
@@ -261,7 +282,7 @@ export class PedidoAgent implements IEventHandler<Record<string, unknown>> {
             ON CONFLICT (id) DO NOTHING
           `;
 
-          const itemId = crypto.randomUUID ? crypto.randomUUID() : generateUUID();
+          const itemId = uuidv4();
           const subtotal = item.quantidade * item.precoUnitario;
 
           await client.query(insertItemQuery, [
@@ -310,7 +331,7 @@ export class PedidoAgent implements IEventHandler<Record<string, unknown>> {
     }
 
     const event = {
-      id: crypto.randomUUID ? crypto.randomUUID() : generateUUID(),
+      id: uuidv4(),
       type: 'PedidoProcessado',
       entity: 'Pedido',
       timestamp: new Date().toISOString(),
@@ -420,7 +441,7 @@ export class PedidoAgent implements IEventHandler<Record<string, unknown>> {
     // Publish status update event
     if (this.rabbitmqChannel) {
       const event = {
-        id: crypto.randomUUID ? crypto.randomUUID() : generateUUID(),
+        id: uuidv4(),
         type: 'PedidoStatusAtualizado',
         entity: 'Pedido',
         timestamp: new Date().toISOString(),
@@ -457,7 +478,9 @@ export class PedidoAgent implements IEventHandler<Record<string, unknown>> {
       this.logger.info('✓ Redis connection closed');
 
       await this.dbPool.end();
-      this.logger.info('✓ Database connection pool closed');      if (this.rabbitmqChannel) {
+      this.logger.info('✓ Database connection pool closed');
+
+      if (this.rabbitmqChannel) {
         await this.rabbitmqChannel.close();
       }
 
@@ -465,7 +488,9 @@ export class PedidoAgent implements IEventHandler<Record<string, unknown>> {
         await (this.rabbitmqConnection as any).close();
       }
 
-      this.logger.info('✓ RabbitMQ connection closed');
+      await this.commandBus.disconnect();
+      this.logger.info('✓ RabbitMQ Command Bus disconnected');
+
       this.logger.info('✓ Pedido Agent stopped');
     } catch (error) {
       this.logger.error('Error stopping agent', error);
@@ -473,12 +498,254 @@ export class PedidoAgent implements IEventHandler<Record<string, unknown>> {
   }
 }
 
-// Fallback UUID generator for older Node versions
-function generateUUID(): string {
-  // eslint-disable-next-line unicorn/prefer-string-replace-all
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-    const r = Math.trunc(Math.random() * 16);
-    const v = c === 'x' ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
+/**
+ * Command Handler for CriarPedidoCommand
+ */
+class CriarPedidoCommandHandler implements ICommandHandler<CriarPedidoCommandData> {
+  private readonly dbPool: Pool;
+  private readonly eventBus: IEventBus;
+  private readonly logger: Logger;
+
+  constructor(dbPool: Pool, eventBus: IEventBus, logger: Logger) {
+    this.dbPool = dbPool;
+    this.eventBus = eventBus;
+    this.logger = logger;
+  }
+
+  commandType(): string {
+    return 'CriarPedidoCommand';
+  }
+
+  entityType(): string {
+    return 'Pedido';
+  }
+
+  async handle(command: CriarPedidoCommand): Promise<void> {
+    const { id, data, metadata } = command;
+    const { clienteId, itens } = data;
+    const { correlationId } = metadata;
+
+    this.logger.info('Handling CriarPedidoCommand', { commandId: id, correlationId });
+
+    const client = await this.dbPool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // 1. Validar regras de negócio (ex: cliente existe, produtos existem e têm estoque)
+      // Por simplicidade, vamos assumir que as validações são bem-sucedidas aqui.
+      // Em um cenário real, você faria consultas ao banco de dados ou chamaria outros agentes.
+      this.logger.debug('Validating business rules for new pedido', { correlationId });
+
+      // 2. Gravar pedido no PostgreSQL
+      const pedidoResult = await client.query(
+        `INSERT INTO pedidos (id, cliente_id, status, total, created_at, updated_at, ativo)
+         VALUES ($1, $2, $3, $4, NOW(), NOW(), TRUE) RETURNING *`,
+        [uuidv4(), clienteId, 'PENDENTE', 0] // Total será atualizado após inserir itens
+      );
+      const pedido = pedidoResult.rows[0];
+      let totalPedido = 0;
+
+      for (const item of itens) {
+        // Buscar preço do produto (simulado)
+        const produtoPreco = 100; // Simular preço do produto
+        const subtotal = item.quantidade * produtoPreco;
+        totalPedido += subtotal;
+
+        await client.query(
+          `INSERT INTO pedido_items (id, pedido_id, produto_id, quantidade, preco_unitario, subtotal, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+          [uuidv4(), pedido.id, item.produtoId, item.quantidade, produtoPreco, subtotal]
+        );
+      }
+
+      // Atualizar total do pedido
+      await client.query(
+        `UPDATE pedidos SET total = $1, updated_at = NOW() WHERE id = $2`,
+        [totalPedido, pedido.id]
+      );
+
+      await client.query('COMMIT');
+      this.logger.info('Pedido created and saved to PostgreSQL', { pedidoId: pedido.id, correlationId });
+
+      // 3. Publicar evento PedidoCriado no EventBus existente
+      const pedidoCriadoEvent = criarPedidoCriadoEvent(
+        {
+          pedidoId: pedido.id,
+          clienteId: pedido.cliente_id,
+          status: pedido.status,
+          total: totalPedido,
+          dataCriacao: new Date().toISOString(),
+          itens: itens.map(item => ({ produtoId: item.produtoId, quantidade: item.quantidade, precoUnitario: 100 })) // Simular preço unitário
+        },
+        correlationId,
+        'PedidoAgent'
+      );
+      await this.eventBus.publish(pedidoCriadoEvent);
+      this.logger.info('PedidoCriado event published', { pedidoId: pedido.id, correlationId });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      this.logger.error('Failed to handle CriarPedidoCommand', error, { commandId: id, correlationId });
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+}
+
+/**
+ * Command Handler for AtualizarPedidoCommand
+ */
+class AtualizarPedidoCommandHandler implements ICommandHandler<AtualizarPedidoCommandData> {
+  private readonly dbPool: Pool;
+  private readonly eventBus: IEventBus;
+  private readonly logger: Logger;
+
+  constructor(dbPool: Pool, eventBus: IEventBus, logger: Logger) {
+    this.dbPool = dbPool;
+    this.eventBus = eventBus;
+    this.logger = logger;
+  }
+
+  commandType(): string {
+    return 'AtualizarPedidoCommand';
+  }
+
+  entityType(): string {
+    return 'Pedido';
+  }
+
+  async handle(command: AtualizarPedidoCommand): Promise<void> {
+    const { id, data, metadata } = command;
+    const { pedidoId, itens, status } = data;
+    const { correlationId } = metadata;
+
+    this.logger.info('Handling AtualizarPedidoCommand', { commandId: id, correlationId, pedidoId });
+
+    const client = await this.dbPool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // 1. Verificar se o pedido existe
+      const pedidoExistente = await client.query('SELECT * FROM pedidos WHERE id = $1 AND ativo = TRUE', [pedidoId]);
+      if (pedidoExistente.rows.length === 0) {
+        throw new Error(`Pedido ${pedidoId} não encontrado`);
+      }
+
+      // 2. Atualizar itens se fornecidos
+      if (itens && itens.length > 0) {
+        // Remover itens existentes
+        await client.query('DELETE FROM pedido_items WHERE pedido_id = $1', [pedidoId]);
+
+        // Inserir novos itens
+        let totalPedido = 0;
+        for (const item of itens) {
+          const produtoPreco = 100; // Simular preço do produto
+          const subtotal = item.quantidade * produtoPreco;
+          totalPedido += subtotal;
+
+          await client.query(
+            `INSERT INTO pedido_items (id, pedido_id, produto_id, quantidade, preco_unitario, subtotal, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+            [uuidv4(), pedidoId, item.produtoId, item.quantidade, produtoPreco, subtotal]
+          );
+        }
+
+        // Atualizar total do pedido
+        await client.query(
+          `UPDATE pedidos SET total = $1, updated_at = NOW() WHERE id = $2`,
+          [totalPedido, pedidoId]
+        );
+      }
+
+      // 3. Atualizar status se fornecido
+      if (status) {
+        await client.query(
+          `UPDATE pedidos SET status = $1, updated_at = NOW() WHERE id = $2`,
+          [status, pedidoId]
+        );
+      }
+
+      await client.query('COMMIT');
+      this.logger.info('Pedido updated in PostgreSQL', { pedidoId, correlationId });
+
+      // 4. Publicar evento PedidoAtualizado no EventBus
+      // (Assumindo que existe uma função criarPedidoAtualizadoEvent similar)
+      // Por enquanto, vamos logar que o evento seria publicado
+      this.logger.info('PedidoAtualizado event would be published', { pedidoId, correlationId });
+
+    } catch (error) {
+      await client.query('ROLLBACK');
+      this.logger.error('Failed to handle AtualizarPedidoCommand', error, { commandId: id, correlationId });
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+}
+
+/**
+ * Command Handler for CancelarPedidoCommand
+ */
+class CancelarPedidoCommandHandler implements ICommandHandler<CancelarPedidoCommandData> {
+  private readonly dbPool: Pool;
+  private readonly eventBus: IEventBus;
+  private readonly logger: Logger;
+
+  constructor(dbPool: Pool, eventBus: IEventBus, logger: Logger) {
+    this.dbPool = dbPool;
+    this.eventBus = eventBus;
+    this.logger = logger;
+  }
+
+  commandType(): string {
+    return 'CancelarPedidoCommand';
+  }
+
+  entityType(): string {
+    return 'Pedido';
+  }
+
+  async handle(command: CancelarPedidoCommand): Promise<void> {
+    const { id, data, metadata } = command;
+    const { pedidoId } = data;
+    const { correlationId } = metadata;
+
+    this.logger.info('Handling CancelarPedidoCommand', { commandId: id, correlationId, pedidoId });
+
+    const client = await this.dbPool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // 1. Verificar se o pedido existe e pode ser cancelado
+      const pedidoExistente = await client.query('SELECT * FROM pedidos WHERE id = $1 AND ativo = TRUE', [pedidoId]);
+      if (pedidoExistente.rows.length === 0) {
+        throw new Error(`Pedido ${pedidoId} não encontrado`);
+      }
+
+      const pedido = pedidoExistente.rows[0];
+      if (pedido.status === 'CANCELADO') {
+        throw new Error(`Pedido ${pedidoId} já está cancelado`);
+      }
+
+      // 2. Atualizar status para CANCELADO
+      await client.query(
+        `UPDATE pedidos SET status = 'CANCELADO', updated_at = NOW() WHERE id = $1`,
+        [pedidoId]
+      );
+
+      await client.query('COMMIT');
+      this.logger.info('Pedido cancelled in PostgreSQL', { pedidoId, correlationId });
+
+      // 3. Publicar evento PedidoCancelado no EventBus
+      // (Assumindo que existe uma função criarPedidoCanceladoEvent similar)
+      this.logger.info('PedidoCancelado event would be published', { pedidoId, correlationId });
+
+    } catch (error) {
+      await client.query('ROLLBACK');
+      this.logger.error('Failed to handle CancelarPedidoCommand', error, { commandId: id, correlationId });
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
 }

@@ -6,9 +6,8 @@
   "type": "module",
   "engines": {
     "node": ">=20.0.0"
-  },
-  "scripts": {
-    "install:all": "npm install && npm install --workspace=event-bus && npm install --workspace=api-gateway && npm install --workspace=cdc && npm install --workspace=agents/pedido-agent && npm install --workspace=agents/cliente-agent && npm install --workspace=agents/produto-agent && npm install --workspace=agents/search-agent && npm install --workspace=agents/cache-agent && npm install --workspace=agents/audit-agent",
+  },  "scripts": {
+    "install:all": "npm install && npm install --workspace=shared && npm install --workspace=command-bus && npm install --workspace=event-bus && npm install --workspace=api-gateway && npm install --workspace=cdc && npm install --workspace=agents/pedido-agent && npm install --workspace=agents/cliente-agent && npm install --workspace=agents/produto-agent && npm install --workspace=agents/search-agent && npm install --workspace=agents/cache-agent && npm install --workspace=agents/audit-agent",
     "build": "npm run build --workspaces",
     "dev": "npm run dev --workspaces",
     "start": "npm start --workspaces",
@@ -20,6 +19,7 @@
   },
   "workspaces": [
     "shared",
+    "command-bus",
     "event-bus",
     "api-gateway",
     "cdc",

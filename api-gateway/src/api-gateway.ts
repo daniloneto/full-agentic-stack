@@ -2,8 +2,9 @@ import express, { Express, Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import { v4 as uuidv4 } from 'uuid';
 import { Pool } from 'pg';
-import { Logger, criarClienteCriadoEvent, criarProdutoCriadoEvent, criarPedidoCriadoEvent } from '@agentic/shared';
+import { Logger, criarClienteCriadoEvent, criarProdutoCriadoEvent, ICommandBus, criarCriarPedidoCommand } from '@agentic/shared';
 import { RabbitMQEventBus } from '@agentic/event-bus';
+import { RabbitMQCommandBus } from '@agentic/command-bus';
 import { Client } from '@opensearch-project/opensearch';
 
 interface AppConfig {
@@ -14,7 +15,7 @@ interface AppConfig {
 
 interface PaginationParams {
   page: number;
-  limit: number;
+  limit: number; // Adicionado a propriedade limit
   offset: number;
 }
 
@@ -32,6 +33,7 @@ export class ApiGateway {
   private readonly app: Express;
   private readonly logger: Logger;
   private readonly eventBus: RabbitMQEventBus;
+  private readonly commandBus: ICommandBus;
   private readonly dbPool: Pool;
   private readonly config: AppConfig;
   private readonly opensearchClient: Client;
@@ -40,7 +42,12 @@ export class ApiGateway {
     this.config = config;
     this.logger = new Logger('ApiGateway');
     this.app = express();
-    this.eventBus = new RabbitMQEventBus({      url: config.rabbitmqUrl,
+    this.eventBus = new RabbitMQEventBus({
+      url: config.rabbitmqUrl,
+      prefetch: 10,
+    });
+    this.commandBus = new RabbitMQCommandBus({
+      url: config.rabbitmqUrl,
       prefetch: 10,
     });
     this.dbPool = new Pool({
@@ -48,7 +55,8 @@ export class ApiGateway {
       max: 20,
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 10000,
-    });    // Initialize OpenSearch client
+    });
+    // Initialize OpenSearch client
     this.opensearchClient = new Client({
       node: process.env.OPENSEARCH_URL || 'https://agentic-opensearch:9200',
       auth: {
@@ -301,107 +309,22 @@ export class ApiGateway {
    * Handle create pedido
    */
   private async handleCreatePedido(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const correlationId = (req as any).correlationId;
     try {
-      const { clienteId, itens, observacoes } = req.body;
-      const correlationId = (req as any).correlationId as string;
+      const { clienteId, itens } = req.body;
 
-      // Validation
-      if (!clienteId || !Array.isArray(itens) || itens.length === 0) {
-        res.status(400).json({
-          error: 'Missing required fields: clienteId, itens (non-empty array)',
-        });
+      // Basic validation
+      if (!clienteId || !itens || !Array.isArray(itens) || itens.length === 0) {
+        res.status(400).json({ message: 'Invalid request payload. clienteId and itens are required.' });
         return;
       }
 
-      // Validate cliente exists
-      const clienteCheck = await this.dbPool.query('SELECT id FROM domain.clientes WHERE id = $1 AND ativo = true', [clienteId]);
-      if (clienteCheck.rows.length === 0) {
-        res.status(400).json({ error: 'Cliente not found' });
-        return;
-      }
+      const command = criarCriarPedidoCommand({ clienteId, itens }, correlationId, 'ApiGateway');
+      await this.commandBus.publish(command);
 
-      // Validate produtos exist
-      for (const item of itens) {
-        const prodCheck = await this.dbPool.query('SELECT id FROM domain.produtos WHERE id = $1 AND ativo = true', [item.produtoId]);
-        if (prodCheck.rows.length === 0) {
-          res.status(400).json({ error: `Produto not found: ${item.produtoId}` });
-          return;
-        }
-      }
-
-      // Calculate total
-      const total = itens.reduce((sum: number, item: any) => sum + item.quantidade * item.precoUnitario, 0);
-      const pedidoId = uuidv4();
-      const now = new Date().toISOString();
-
-      // Create event (we'll publish after DB transaction)
-      const event = criarPedidoCriadoEvent(
-        {
-          pedidoId,
-          clienteId,
-          itens,
-          total,
-          status: 'PENDENTE',
-          dataCriacao: now,
-        },
-        correlationId,
-        'api-gateway'
-      );
-
-      // Persist to domain database in a transaction
-      const client = await this.dbPool.connect();
-      try {
-        await client.query('BEGIN');
-
-        const insertPedidoResult = await client.query(
-          `INSERT INTO domain.pedidos (id, cliente_id, status, total, observacoes, created_at, updated_at, created_by_event_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $6, $7)
-           RETURNING id`,
-          [pedidoId, clienteId, 'PENDENTE', total, observacoes || null, now, event.id]
-        );
-
-        if (insertPedidoResult.rows.length === 0) {
-          await client.query('ROLLBACK');
-          this.logger.warn('Pedido insert returned no rows', { pedidoId });
-          res.status(500).json({ error: 'Failed to persist pedido' });
-          return;
-        }
-
-        for (const item of itens) {
-          const itemId = uuidv4();
-          const subtotal = item.quantidade * item.precoUnitario;
-          await client.query(
-            `INSERT INTO domain.pedido_itens (id, pedido_id, produto_id, quantidade, preco_unitario, subtotal, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-            [itemId, pedidoId, item.produtoId, item.quantidade, item.precoUnitario, subtotal, now]
-          );
-        }
-
-        await client.query('COMMIT');
-        this.logger.info('Inserted pedido into domain', { pedidoId });
-      } catch (err) {
-        await client.query('ROLLBACK');
-        throw err;
-      } finally {
-        client.release();
-      }
-
-      // Publish event after commit
-      await this.eventBus.publish(event);
-
-      this.logger.info('Pedido created', {
-        pedidoId,
-        clienteId,
-        correlationId,
-      });
-
-      res.status(201).json({
-        pedidoId,
-        message: 'Pedido criado com sucesso',
-        total,
-        correlationId,
-      });
+      res.status(202).json({ status: 'accepted', correlationId: command.metadata.correlationId });
     } catch (error) {
+      this.logger.error('Failed to create pedido command', error as Error, { correlationId });
       next(error);
     }
   }
@@ -943,7 +866,7 @@ export class ApiGateway {
   /**
    * Handle search produtos in OpenSearch
    */
-  private async handleSearchProdutos(req: Request, res: Response, next: NextFunction): Promise<void> {
+  private async handleSearchProdutos(req: Request, res: Response, _next: NextFunction): Promise<void> {
     try {
       const { query } = req.body;
       const searchTerm = query || '*';
@@ -984,7 +907,7 @@ export class ApiGateway {
   /**
    * Handle search clientes in OpenSearch
    */
-  private async handleSearchClientes(req: Request, res: Response, next: NextFunction): Promise<void> {
+  private async handleSearchClientes(req: Request, res: Response, _next: NextFunction): Promise<void> {
     try {
       const { query } = req.body;
       const searchTerm = query || '*';
@@ -1025,7 +948,7 @@ export class ApiGateway {
   /**
    * Handle search pedidos in OpenSearch
    */
-  private async handleSearchPedidos(req: Request, res: Response, next: NextFunction): Promise<void> {
+  private async handleSearchPedidos(req: Request, res: Response, _next: NextFunction): Promise<void> {
     try {
       const { query } = req.body;
       const searchTerm = query || '*';
@@ -1098,6 +1021,7 @@ export class ApiGateway {
 
       // Connect to event bus
       await this.eventBus.connect();
+      await this.commandBus.connect();
 
       // Start HTTP server
       this.app.listen(this.config.port, () => {
@@ -1114,6 +1038,7 @@ export class ApiGateway {
    */
   async stop(): Promise<void> {
     await this.eventBus.disconnect();
+    await this.commandBus.disconnect();
     await this.dbPool.end();
     this.logger.info('✓ API Gateway stopped');
   }

@@ -15,9 +15,15 @@
     "sourceMap": true,
     "composite": true,
     "outDir": "./dist",
-    "rootDir": "./src"
-  },  "references": [
-    { "path": "../../shared" }
+    "rootDir": "./src",
+    "paths": {
+      "@agentic/shared": ["../../shared/src"],
+      "@agentic/command-bus": ["../../command-bus/src"]
+    }
+  },
+  "references": [
+    { "path": "../../shared" },
+    { "path": "../../command-bus" }
   ],
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]
