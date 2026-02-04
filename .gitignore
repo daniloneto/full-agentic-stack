@@ -36,4 +36,3 @@ temp/
 
 # Docker
 .docker/
-*.md
